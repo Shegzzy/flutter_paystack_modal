@@ -1,6 +1,6 @@
 // lib/flutter_paystack_modal.dart
 
-library;
+library flutter_paystack_modal;
 
 export 'package:paystack_bottomsheet/src/paystack_bottom_sheet.dart';
 export 'package:paystack_bottomsheet/src/paystack_config.dart';
