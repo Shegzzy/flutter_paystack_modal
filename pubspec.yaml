@@ -1,4 +1,4 @@
-name: paystack_bottomsheet
+name: flutter_paystack_modal
 description: "A Flutter package that opens flutter_paystack_plus inside a 
   bottom sheet modal for a seamless in-app payment experience."
 version: 0.0.1

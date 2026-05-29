@@ -1,13 +1,14 @@
 // lib/flutter_paystack_modal.dart
 
-library flutter_paystack_modal;
+library;
 
-export 'package:paystack_bottomsheet/src/paystack_bottom_sheet.dart';
-export 'package:paystack_bottomsheet/src/paystack_config.dart';
+export 'package:flutter_paystack_modal/src/paystack_bottom_sheet.dart';
+export 'package:flutter_paystack_modal/src/paystack_config.dart';
 
 import 'package:flutter/material.dart';
-import 'package:paystack_bottomsheet/src/paystack_bottom_sheet.dart';
-import 'package:paystack_bottomsheet/src/paystack_config.dart';
+import 'package:flutter_paystack_modal/src/paystack_bottom_sheet.dart';
+import 'package:flutter_paystack_modal/src/paystack_config.dart';
+
 
 /// Shows a Paystack payment bottom sheet modal.
 ///
