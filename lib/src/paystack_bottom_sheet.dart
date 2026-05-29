@@ -111,7 +111,6 @@ class _PaystackBottomSheetState extends State<PaystackBottomSheet> {
       if (mounted) Navigator.of(context).pop();
       widget.onSuccess?.call(reference);
     } catch (e) {
-      // Verification failed — keep sheet open, show error
       _showError('Payment verification failed: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);

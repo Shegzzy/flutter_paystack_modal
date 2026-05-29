@@ -36,9 +36,6 @@ class PaystackConfig {
   /// Currency code. Defaults to 'NGN'
   final String currency;
 
-  /// Payment channels to allow
-  final List<String> channels;
-
   /// Which initialization mode is active
   final PaystackMode mode;
 
@@ -46,28 +43,24 @@ class PaystackConfig {
 
   const PaystackConfig.withKeys({
     required this.publicKey,
-    required String secretKey,
+    required this.secretKey,
     required this.email,
     required this.amountInSubunit,
     required this.reference,
     this.currency = 'NGN',
-    this.channels = const ['card', 'bank', 'ussd', 'bank_transfer'],
-  })  : secretKey = secretKey,
-        authorizationUrl = null,
+  })  : authorizationUrl = null,
         mode = PaystackMode.directKeys;
 
   // ─── Named constructor: Cloud Function (recommended for production) ──────────
 
   const PaystackConfig.withAuthUrl({
     required this.publicKey,
-    required String authorizationUrl,
+    required this.authorizationUrl,
     required this.email,
     required this.amountInSubunit,
     required this.reference,
     this.currency = 'NGN',
-    this.channels = const ['card', 'bank', 'ussd', 'bank_transfer'],
-  })  : authorizationUrl = authorizationUrl,
-        secretKey = null,
+  })  : secretKey = null,
         mode = PaystackMode.cloudFunction;
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
