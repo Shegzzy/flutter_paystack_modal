@@ -3,11 +3,11 @@
 library;
 
 export 'package:flutter_paystack_modal/src/paystack_bottom_sheet.dart';
-export 'package:flutter_paystack_modal/src/paystack_config.dart';
+export 'package:flutter_paystack_modal/src/models/paystack_config.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_paystack_modal/src/paystack_bottom_sheet.dart';
-import 'package:flutter_paystack_modal/src/paystack_config.dart';
+import 'package:flutter_paystack_modal/src/models/paystack_config.dart';
 
 
 /// Shows a Paystack payment bottom sheet modal.
@@ -88,10 +88,6 @@ Future<void> showPaystackPayment({
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    // Prevent accidental dismissal by tapping outside the sheet.
-    // The user must swipe down (or complete/cancel payment) to close.
-    // Swipe-to-dismiss is additionally blocked during payment/verification
-    // by PopScope(canPop: false) inside the widget.
     isDismissible: false,
     builder: (_) => PaystackBottomSheet(
       config: config,
