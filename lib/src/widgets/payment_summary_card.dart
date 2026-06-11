@@ -19,6 +19,13 @@ class PaymentSummaryCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
       child: Column(
         children: [
@@ -45,8 +52,6 @@ class PaymentSummaryCard extends StatelessWidget {
   }
 }
 
-/// A single label → value row. Private to this file — only used by
-/// [PaymentSummaryCard].
 class _DetailRow extends StatelessWidget {
   final String label;
   final String value;

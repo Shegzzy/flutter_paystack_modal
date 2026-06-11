@@ -7,18 +7,23 @@ sealed class PaymentState {
   const PaymentState();
 }
 
-/// Nothing is happening — sheet is visible, user hasn't tapped Pay yet.
+/// Nothing is happening — sheet is visible, WebView is loading.
 class PaymentIdle extends PaymentState {
   const PaymentIdle();
 }
 
-/// The Paystack webview popup is launching.
-class PaymentOpening extends PaymentState {
-  const PaymentOpening();
+/// The Paystack WebView is still loading its initial page.
+class PaymentLoading extends PaymentState {
+  const PaymentLoading();
 }
 
-/// Paystack confirmed the charge; we are now awaiting your backend
-/// verification cloud function to return.
+/// WebView is fully loaded and the user can interact with the checkout.
+class PaymentReady extends PaymentState {
+  const PaymentReady();
+}
+
+/// Paystack redirected to the success callback URL — now we are
+/// waiting for [onVerify] (your backend) to return.
 class PaymentVerifying extends PaymentState {
   const PaymentVerifying();
 }
@@ -30,8 +35,12 @@ class PaymentSuccess extends PaymentState {
 }
 
 /// Something went wrong. [message] is shown in a SnackBar.
-/// The provider clears this back to [PaymentIdle] after the UI consumes it.
 class PaymentError extends PaymentState {
   final String message;
   const PaymentError(this.message);
+}
+
+/// User closed the sheet without completing payment.
+class PaymentCancelled extends PaymentState {
+  const PaymentCancelled();
 }

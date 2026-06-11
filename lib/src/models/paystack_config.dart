@@ -1,26 +1,24 @@
-// lib/src/paystack_config.dart
+// lib/src/models/paystack_config.dart
 
-/// Defines how Paystack payment is initialized.
+/// Defines how the Paystack payment is initialized.
 enum PaystackMode {
-  /// Uses a secretKey directly in the app.
-  /// ⚠️ Only for development/testing. Never ship secret keys in production.
-  directKeys,
-
-  /// Uses a pre-fetched authorization URL from your backend/cloud function.
+  /// Uses only a pre-fetched authorization URL from your backend.
   /// ✅ Recommended for production — secret key stays on your server.
-  cloudFunction,
+  authUrl,
+
+  /// Builds the checkout URL directly from email + amount + reference.
+  /// ⚠️ For testing / simple integrations only. No secret key needed.
+  inline,
 }
 
 class PaystackConfig {
   /// Your Paystack public key (pk_live_... or pk_test_...)
   final String publicKey;
 
-  /// Secret key — only used in [PaystackMode.directKeys].
-  /// ⚠️ Never include this in production apps.
-  final String? secretKey;
-
-  /// Authorization URL returned by your backend cloud function.
-  /// Required when using [PaystackMode.cloudFunction].
+  /// Authorization URL returned by your backend after calling
+  /// POST https://api.paystack.co/transaction/initialize
+  ///
+  /// Required when using [PaystackMode.authUrl].
   final String? authorizationUrl;
 
   /// Customer's email address
@@ -30,7 +28,8 @@ class PaystackConfig {
   /// e.g. NGN 1,500 → pass 150000
   final int amountInSubunit;
 
-  /// Unique transaction reference — must match what your backend used to initialize
+  /// Unique transaction reference — must match what your backend used
+  /// to initialize the transaction.
   final String reference;
 
   /// Currency code. Defaults to 'NGN'
@@ -39,20 +38,11 @@ class PaystackConfig {
   /// Which initialization mode is active
   final PaystackMode mode;
 
-  // ─── Named constructor: Direct Keys (dev/testing only) ──────────────────────
+  // ─── Named constructor: Auth URL (recommended for production) ─────────────
 
-  const PaystackConfig.withKeys({
-    required this.publicKey,
-    required this.secretKey,
-    required this.email,
-    required this.amountInSubunit,
-    required this.reference,
-    this.currency = 'NGN',
-  })  : authorizationUrl = null,
-        mode = PaystackMode.directKeys;
-
-  // ─── Named constructor: Cloud Function (recommended for production) ──────────
-
+  /// Use this when your backend has already called
+  /// POST https://api.paystack.co/transaction/initialize
+  /// and returned the authorization_url and reference.
   const PaystackConfig.withAuthUrl({
     required this.publicKey,
     required this.authorizationUrl,
@@ -60,16 +50,54 @@ class PaystackConfig {
     required this.amountInSubunit,
     required this.reference,
     this.currency = 'NGN',
-  })  : secretKey = null,
-        mode = PaystackMode.cloudFunction;
+  }) : mode = PaystackMode.authUrl;
 
-  // ─── Helpers ────────────────────────────────────────────────────────────────
+  // ─── Named constructor: Inline (testing) ─────────────────────────────────
 
-  /// Human-readable formatted amount, e.g. "NGN 1,500.00"
-  String get formattedAmount {
-    final amount = amountInSubunit / 100;
-    return '$currency ${amount.toStringAsFixed(2)}';
+  /// Builds the Paystack inline checkout URL directly.
+  /// ⚠️ Only for testing — no verification step, no secret key.
+  const PaystackConfig.inline({
+    required this.publicKey,
+    required this.email,
+    required this.amountInSubunit,
+    required this.reference,
+    this.currency = 'NGN',
+  })  : authorizationUrl = null,
+        mode = PaystackMode.inline;
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /// The URL that will be loaded in the WebView.
+  /// For [PaystackMode.authUrl], this is the authorization URL from your backend.
+  /// For [PaystackMode.inline], this builds the standard Paystack JS checkout URL.
+  String get checkoutUrl {
+    if (mode == PaystackMode.authUrl) {
+      return authorizationUrl!;
+    }
+    // Paystack inline checkout — opens the hosted payment page
+    return 'https://checkout.paystack.com/$reference';
   }
 
-  bool get isCloudFunctionMode => mode == PaystackMode.cloudFunction;
+  /// Human-readable formatted amount, e.g. "₦1,500.00"
+  String get formattedAmount {
+    final amount = amountInSubunit / 100;
+    final parts = amount.toStringAsFixed(2).split('.');
+    final intPart = parts[0].split('').reversed.toList();
+    final result = <String>[];
+    for (int i = 0; i < intPart.length; i++) {
+      if (i > 0 && i % 3 == 0) result.add(',');
+      result.add(intPart[i]);
+    }
+    final formatted = '${result.reversed.join()}.${parts[1]}';
+    return switch (currency) {
+      'NGN' => '₦$formatted',
+      'USD' => '\$$formatted',
+      'GHS' => 'GH₵$formatted',
+      'ZAR' => 'R$formatted',
+      'KES' => 'KSh$formatted',
+      _ => '$currency $formatted',
+    };
+  }
+
+  bool get isAuthUrlMode => mode == PaystackMode.authUrl;
 }
