@@ -1,4 +1,3 @@
-// lib/paystack_bottomsheet.dart
 library;
 
 export 'src/paystack_bottom_sheet.dart';
@@ -9,92 +8,56 @@ import 'package:flutter/material.dart';
 import 'src/paystack_bottom_sheet.dart';
 import 'src/models/paystack_config.dart';
 
-/// Shows a Paystack payment bottom sheet.
+/// Shows the Paystack payment bottom sheet.
 ///
-/// The payment flow uses a fully-controlled [WebViewController] that intercepts
-/// Paystack's redirect URLs directly — so [onSuccess] and [onClosed] fire
-/// reliably every time, regardless of how the WebView closes.
+/// ─── authUrl mode (production) ────────────────────────────────────────────
 ///
-/// ─────────────────────────────────────────────────────────────────────────────
-/// MODE 1 — Backend-initialized (✅ Recommended for production)
-/// Your server calls POST /transaction/initialize and returns the
-/// authorization_url and reference. The secret key never touches the app.
+/// 1. Your backend calls POST /transaction/initialize and returns
+///    authorization_url, reference, and your callback_url.
+///
+/// 2. Pass callbackUrl — this is the URL your Paystack dashboard is
+///    configured to redirect to after payment. The WebView detects when
+///    Paystack navigates to this URL and fires onSuccess.
+///    Without it, the package can't know when payment is done.
 ///
 /// ```dart
-/// // 1. Call your backend to initialize the transaction
-/// final result = await myApi.initializePayment(
-///   email: email,
-///   amountInKobo: 150000,
-/// );
-///
-/// // 2. Build the config from the backend response
 /// final config = PaystackConfig.withAuthUrl(
 ///   publicKey: 'pk_live_...',
 ///   authorizationUrl: result.authorizationUrl,
-///   email: email,
+///   email: 'user@example.com',
 ///   amountInSubunit: 150000,
 ///   reference: result.reference,
+///   callbackUrl: 'https://yourapp.com/payment/callback', // ← required
 /// );
 ///
-/// // 3. Show the sheet
 /// await showPaystackPayment(
 ///   context: context,
 ///   config: config,
-///   onVerify: (ref) async {
-///     // 4. Verify via your backend
-///     await myApi.verifyPayment(ref);
-///   },
-///   onSuccess: (ref) {
-///     print('Payment confirmed! $ref');
-///   },
-///   onClosed: () {
-///     print('User cancelled');
-///   },
-///   onError: (err) {
-///     print('Error: $err');
-///   },
+///   onVerify: (ref) async => await myApi.verifyPayment(ref),
+///   onSuccess: (ref) => Navigator.pushNamed(context, '/success'),
+///   onClosed: () => print('cancelled'),
+///   onError: (e) => print('error: $e'),
 /// );
 /// ```
 ///
-/// ─────────────────────────────────────────────────────────────────────────────
-/// MODE 2 — Inline (⚠️ Testing only)
+/// ─── inline mode (testing) ────────────────────────────────────────────────
 ///
 /// ```dart
 /// final config = PaystackConfig.inline(
 ///   publicKey: 'pk_test_...',
-///   email: 'user@example.com',
+///   email: 'test@example.com',
 ///   amountInSubunit: 150000,
 ///   reference: 'TXN_${DateTime.now().millisecondsSinceEpoch}',
-/// );
-///
-/// await showPaystackPayment(
-///   context: context,
-///   config: config,
-///   onSuccess: (ref) => print('Done: $ref'),
 /// );
 /// ```
 Future<void> showPaystackPayment({
   required BuildContext context,
   required PaystackConfig config,
-
-  /// Optional label shown at the top of the bottom sheet.
   String? title,
-
-  /// Optional subtitle / description.
   String? description,
-
-  /// Called when the user closes the sheet without paying.
   void Function()? onClosed,
-
-  /// Called right after Paystack confirms the payment (redirect intercepted).
-  /// Use this to call your backend verification endpoint.
-  /// Throw here to signal failure — the sheet will show an error + retry.
   Future<void> Function(String reference)? onVerify,
-
-  /// Called after [onVerify] completes (or immediately if no [onVerify]).
   void Function(String reference)? onSuccess,
-
-  /// Called on any error (network, verification failure, etc.).
   void Function(String error)? onError,
 }) {
   return showModalBottomSheet(
@@ -102,7 +65,7 @@ Future<void> showPaystackPayment({
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     isDismissible: false,
-    enableDrag: false, // We manage drag/dismiss via PopScope
+    enableDrag: false,
     builder: (_) => PaystackBottomSheet(
       config: config,
       title: title,

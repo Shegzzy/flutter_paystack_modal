@@ -6,30 +6,15 @@ import 'package:provider/provider.dart';
 import 'models/payment_state.dart';
 import 'models/paystack_config.dart';
 import 'providers/paystack_provider.dart';
-import 'widgets/payment_summary_card.dart';
 import 'widgets/paystack_webview.dart';
 
-/// Public-facing widget. Owns the [ChangeNotifierProvider] lifetime.
-///
-/// Business logic:  [PaystackProvider]
-/// Summary card:    [PaymentSummaryCard]
-/// WebView area:    [PaystackWebView]
 class PaystackBottomSheet extends StatelessWidget {
   final PaystackConfig config;
   final String? title;
   final String? description;
-
-  /// Called when user closes the sheet without completing payment.
   final void Function()? onClosed;
-
-  /// Called after Paystack confirms success. Use this to call your backend.
-  /// Throw to signal failure — the sheet will show an error + retry.
   final Future<void> Function(String reference)? onVerify;
-
-  /// Called after [onVerify] completes (or immediately if no [onVerify]).
   final void Function(String reference)? onSuccess;
-
-  /// Called on any error (network, verification failure, etc.).
   final void Function(String error)? onError;
 
   const PaystackBottomSheet({
@@ -53,49 +38,70 @@ class PaystackBottomSheet extends StatelessWidget {
         onClosed: onClosed,
         onError: onError,
       ),
-      child: _SheetContent(
-        title: title,
-        description: description,
-      ),
+      child: _SheetContent(title: title, description: description),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inner content — StatefulWidget so it can listen for errors as a side-effect
-// (SnackBar) and auto-close the sheet after success.
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _SheetContent extends StatefulWidget {
   final String? title;
   final String? description;
-
   const _SheetContent({this.title, this.description});
 
   @override
   State<_SheetContent> createState() => _SheetContentState();
 }
 
-class _SheetContentState extends State<_SheetContent> {
+class _SheetContentState extends State<_SheetContent>
+    with SingleTickerProviderStateMixin {
   late final PaystackProvider _provider;
+  late final AnimationController _successAnim;
 
   @override
   void initState() {
     super.initState();
     _provider = context.read<PaystackProvider>();
-    _provider.addListener(_onProviderUpdate);
+    _provider.addListener(_onStateChange);
+
+    _successAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
   }
 
   @override
   void dispose() {
-    _provider.removeListener(_onProviderUpdate);
+    _provider.removeListener(_onStateChange);
+    _successAnim.dispose();
     super.dispose();
   }
 
-  void _onProviderUpdate() {
+  void _onStateChange() {
     final state = _provider.state;
 
-    // Show error in a SnackBar then reset so it doesn't show again.
+    if (state is PaymentSuccess) {
+      _successAnim.forward();
+      // Fire onSuccess immediately so callers awaiting showPaystackPayment()
+      // see the result before the future resolves. Pop happens after the
+      // animation for visual polish, but the callback can't wait for that.
+      _provider.fireSuccessCallback();
+
+      Future.delayed(const Duration(milliseconds: 1400), () {
+        if (!mounted) return;
+        Navigator.of(context).pop();
+      });
+    }
+
+    if (state is PaymentCancelled) {
+      _provider.fireClosedCallback();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Navigator.of(context).pop();
+      });
+    }
+
     if (state is PaymentError) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
@@ -104,164 +110,230 @@ class _SheetContentState extends State<_SheetContent> {
             content: Text(state.message),
             backgroundColor: Colors.red.shade700,
             behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           ),
         );
         _provider.clearError();
       });
     }
+  }
 
-    // Auto-close the sheet a beat after success so user sees the tick.
-    if (state is PaymentSuccess) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        Future.delayed(const Duration(milliseconds: 800), () {
-          if (mounted) Navigator.of(context).pop();
-        });
-      });
-    }
-
-    // Close immediately on cancel.
-    if (state is PaymentCancelled) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.of(context).pop();
-      });
-    }
+  void _dismiss() {
+    _provider.handleUserDismiss();
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<PaystackProvider>();
     final theme = Theme.of(context);
-    final bottomPadding = MediaQuery.of(context).viewInsets.bottom +
-        MediaQuery.of(context).padding.bottom;
+    final mq = MediaQuery.of(context);
 
     return PopScope(
       canPop: !provider.isLoading,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) provider.handleUserDismiss();
+        if (didPop) _dismiss();
       },
       child: Container(
-        // Take up most of the screen so the WebView has room.
-        height: MediaQuery.of(context).size.height * 0.9,
-        padding: EdgeInsets.fromLTRB(0, 12, 0, bottomPadding),
+        height: mq.size.height * 0.92,
         decoration: BoxDecoration(
           color: theme.colorScheme.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Drag handle ──────────────────────────────────────────────
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: theme.dividerColor,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+            _SheetHeader(
+              title: widget.title,
+              description: widget.description,
+              config: provider.config,
+              isLoading: provider.isLoading,
+              onClose: _dismiss,
+            ),
+            Expanded(child: PaystackWebView(successAnim: _successAnim)),
+            _SheetFooter(isAuthMode: provider.config.isAuthUrlMode),
+            SizedBox(height: mq.padding.bottom),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Header ──────────────────────────────────────────────────────────────────
+
+class _SheetHeader extends StatelessWidget {
+  final String? title;
+  final String? description;
+  final PaystackConfig config;
+  final bool isLoading;
+  final VoidCallback onClose;
+
+  const _SheetHeader({
+    required this.title,
+    required this.description,
+    required this.config,
+    required this.isLoading,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        boxShadow: [
+          BoxShadow(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3),
+            blurRadius: 1,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Drag handle
+          const SizedBox(height: 10),
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.outlineVariant,
+                borderRadius: BorderRadius.circular(2),
               ),
             ),
-            const SizedBox(height: 16),
+          ),
+          const SizedBox(height: 12),
 
-            // ── Header ───────────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 8, 0),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Paystack logo mark
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00C3F7).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      '₦',
+                      style: TextStyle(
+                        color: Color(0xFF0BA4DB),
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(
-                        child: Text(
-                          widget.title ?? 'Complete Payment',
-                          style: theme.textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.bold),
+                      Text(
+                        title ?? 'Complete Payment',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.2,
                         ),
                       ),
-                      // Close button
-                      if (!provider.isLoading)
-                        IconButton(
-                          icon: const Icon(Icons.close),
-                          onPressed: () {
-                            provider.handleUserDismiss();
-                            Navigator.of(context).pop();
-                          },
+                      if (description != null)
+                        Text(
+                          description!,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.outline,
+                          ),
                         ),
                     ],
                   ),
-                  if (widget.description != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      widget.description!,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(color: theme.colorScheme.outline),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-
-            const SizedBox(height: 12),
-
-            // ── Payment summary ───────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: PaymentSummaryCard(config: provider.config),
-            ),
-
-            if (provider.config.isAuthUrlMode) ...[
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    const SizedBox(height: 6),
-                    Icon(Icons.cloud_done_outlined,
-                        size: 12, color: theme.colorScheme.outline),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Secured via backend',
-                      style: TextStyle(
-                          fontSize: 11, color: theme.colorScheme.outline),
-                    ),
-                  ],
                 ),
-              ),
-            ],
 
-            const SizedBox(height: 12),
-
-            // ── WebView — takes all remaining space ───────────────────────
-            Expanded(
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(bottom: Radius.circular(24)),
-                child: const PaystackWebView(),
-              ),
-            ),
-
-            // ── Paystack badge ────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10, top: 8),
-              child: Center(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.lock_outline,
-                        size: 12, color: theme.colorScheme.outline),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Secured by Paystack',
-                      style: TextStyle(
-                          color: theme.colorScheme.outline, fontSize: 11),
+                // Amount badge
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0BA4DB).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    config.formattedAmount,
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: const Color(0xFF0BA4DB),
+                      fontWeight: FontWeight.w700,
                     ),
-                  ],
+                  ),
                 ),
-              ),
+                const SizedBox(width: 4),
+
+                // Close button — hidden while loading
+                if (!isLoading)
+                  IconButton(
+                    icon: Icon(Icons.close,
+                        size: 20, color: theme.colorScheme.outline),
+                    onPressed: onClose,
+                    style: IconButton.styleFrom(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  )
+                else
+                  const SizedBox(width: 40),
+              ],
             ),
-          ],
+          ),
+
+          // Thin divider
+          const SizedBox(height: 10),
+          Divider(height: 1, color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Footer ───────────────────────────────────────────────────────────────────
+
+class _SheetFooter extends StatelessWidget {
+  final bool isAuthMode;
+  const _SheetFooter({required this.isAuthMode});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+          ),
         ),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.lock_outline_rounded,
+              size: 12, color: theme.colorScheme.outline),
+          const SizedBox(width: 5),
+          Text(
+            isAuthMode
+                ? 'Secured by Paystack · Backend-verified'
+                : 'Secured by Paystack',
+            style: TextStyle(
+              color: theme.colorScheme.outline,
+              fontSize: 11,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
       ),
     );
   }

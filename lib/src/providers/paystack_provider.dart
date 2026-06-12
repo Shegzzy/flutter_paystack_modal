@@ -8,37 +8,34 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../models/paystack_config.dart';
 import '../models/payment_state.dart';
 
-/// Owns every state transition in the payment flow.
+/// ── How Paystack's redirect actually works (authUrl mode) ────────────────────
 ///
-/// How callbacks work reliably:
-/// ─────────────────────────────────────────────────────────────────────────
-/// Paystack always redirects to one of these callback URLs when the
-/// transaction ends:
+/// When you initialize via your backend, Paystack sends the user to
+/// checkout.paystack.com. After payment, it does NOT go to
+/// standard.paystack.co/close — instead it redirects to whatever
+/// callback_url you set in your Paystack dashboard (or passed during
+/// transaction initialization), e.g.:
 ///
-///   Success:   https://standard.paystack.co/close
-///              https://checkout.paystack.com/close        (inline)
+///   https://yourapp.com/payment/callback?trxref=xxx&reference=xxx
 ///
-///   Cancelled: https://standard.paystack.co/close         (same URL — we
-///              check the state to distinguish)
+/// That URL may return a 404 in a WebView — that's fine, we only care that
+/// the navigation happened. We detect it via [config.callbackUrl].
 ///
-/// We intercept these via [WebViewController.setNavigationDelegate] and
-/// call [onSuccess] / [onClosed] ourselves — no reliance on a third-party
-/// package's callback mechanism.
+/// For cancellation, Paystack navigates back through checkout.paystack.com
+/// and eventually hits /close or the user's close button — we detect that
+/// by watching for the checkout origin to disappear or an explicit close URL.
+///
+/// ── Why onNavigationRequest isn't enough on Android ─────────────────────────
+///
+/// Android's WebView only fires onNavigationRequest for the MAIN frame.
+/// Sub-frames (iframes) bypass it silently. We must also check onPageStarted,
+/// which fires for all frames. Both feed into the same _checkUrl() so we
+/// can't double-fire.
 class PaystackProvider extends ChangeNotifier {
   final PaystackConfig config;
-
-  /// Called right after Paystack redirects to the success URL.
-  /// Throw here to signal verification failure — the provider catches it
-  /// and transitions to [PaymentError].
   final Future<void> Function(String reference)? onVerify;
-
-  /// Called after [onVerify] completes (or immediately if no [onVerify]).
   final void Function(String reference)? onSuccess;
-
-  /// Called when the user cancels / closes without paying.
   final void Function()? onClosed;
-
-  /// Called when an error occurs during payment.
   final void Function(String error)? onError;
 
   PaystackProvider({
@@ -59,28 +56,27 @@ class PaystackProvider extends ChangeNotifier {
   WebViewController? _webViewController;
   WebViewController? get webViewController => _webViewController;
 
-  bool get isLoading =>
-      _state is PaymentLoading || _state is PaymentVerifying;
+  bool get isLoading => _state is PaymentLoading || _state is PaymentVerifying;
 
-  bool get isReady => _state is PaymentReady;
+  bool _handled = false;
 
-  /// Prevents [onClosed] from firing when WE programmatically pop.
-  bool _closedByCode = false;
+  // ─── Known terminal URL patterns ─────────────────────────────────────────
+  //
+  // These cover the fallback case where no callbackUrl is configured,
+  // or for inline mode.
 
-  // ─── Paystack callback URL patterns ───────────────────────────────────────
-
-  static const _successUrls = [
+  static const _knownSuccessPatterns = [
     'https://standard.paystack.co/close',
     'https://checkout.paystack.com/close',
     'paystack://close',
   ];
 
-  static const _cancelUrls = [
+  static const _knownCancelPatterns = [
     'https://standard.paystack.co/cancel',
     'https://checkout.paystack.com/cancel',
   ];
 
-  // ─── WebView setup ────────────────────────────────────────────────────────
+  // ─── WebView ──────────────────────────────────────────────────────────────
 
   void _initWebViewController() {
     _webViewController = WebViewController()
@@ -88,114 +84,183 @@ class PaystackProvider extends ChangeNotifier {
       ..setBackgroundColor(Colors.transparent)
       ..setNavigationDelegate(
         NavigationDelegate(
-          onPageStarted: (_) {
-            if (_state is PaymentLoading) return; // already in loading state
+          // Fires for ALL frames on Android — primary intercept point.
+          onPageStarted: (url) {
+            log('[Paystack] pageStarted: $url');
+            _checkUrl(url, preventable: false);
           },
+
           onPageFinished: (url) {
+            log('[Paystack] pageFinished: $url');
             if (_state is PaymentLoading) {
               _setState(const PaymentReady());
             }
           },
-          onWebResourceError: (error) {
-            // Ignore errors for the close/cancel redirect pages — they're
-            // expected to return 404 or similar, we only care about the URL.
-            final url = error.url ?? '';
-            if (_isSuccessUrl(url) || _isCancelUrl(url)) return;
 
-            log('WebView error: ${error.description} on ${error.url}');
-            _setState(PaymentError(
-              'Page failed to load: ${error.description}',
-            ));
-          },
+          // Fires for main-frame navigations only — secondary intercept point.
           onNavigationRequest: (request) {
-            final url = request.url;
-            log('Paystack navigation: $url');
+            log('[Paystack] navigationRequest: ${request.url}');
+            final isTerminal = _checkUrl(request.url, preventable: true);
+            return isTerminal
+                ? NavigationDecision.prevent
+                : NavigationDecision.navigate;
+          },
 
-            if (_isSuccessUrl(url)) {
-              _handleSuccess();
-              return NavigationDecision.prevent;
+          onWebResourceError: (error) {
+            final url = error.url ?? '';
+            log('[Paystack] resourceError: ${error.description} | url: $url | mainFrame: ${error.isForMainFrame}');
+
+            // A 404/error on the callback URL means payment went through —
+            // the app's server just isn't serving that route in the WebView.
+            // Treat it as success.
+            if (_isCallbackUrl(url)) {
+              log('[Paystack] callback URL errored (expected) — treating as success');
+              _handleSuccess(url);
+              return;
             }
 
-            if (_isCancelUrl(url)) {
-              _handleCancel();
-              return NavigationDecision.prevent;
-            }
+            // Ignore errors on known terminal pages (they 404 by design).
+            if (_isKnownSuccessUrl(url) || _isKnownCancelUrl(url)) return;
 
-            return NavigationDecision.navigate;
+            // Ignore sub-resource errors (ads, analytics, fonts, etc.)
+            if (error.isForMainFrame != null && !error.isForMainFrame!) return;
+
+            // Real main-frame load failure
+            if (_state is PaymentLoading || _state is PaymentReady) {
+              final msg = 'Failed to load payment page. Check your connection.';
+              _setState(PaymentError(msg));
+              onError?.call(msg);
+            }
           },
         ),
       )
       ..loadRequest(Uri.parse(config.checkoutUrl));
   }
 
-  // ─── URL helpers ──────────────────────────────────────────────────────────
+  // ─── URL classification ───────────────────────────────────────────────────
 
-  bool _isSuccessUrl(String url) =>
-      _successUrls.any((pattern) => url.startsWith(pattern));
+  bool _isCallbackUrl(String url) {
+    final cb = config.callbackUrl;
+    if (cb == null || cb.isEmpty) return false;
+    // Strip query params from both for prefix matching
+    final cbBase = cb.split('?').first.split('#').first;
+    final urlBase = url.split('?').first.split('#').first;
+    return urlBase.startsWith(cbBase);
+  }
 
-  bool _isCancelUrl(String url) =>
-      _cancelUrls.any((pattern) => url.startsWith(pattern));
+  bool _isKnownSuccessUrl(String url) =>
+      _knownSuccessPatterns.any((p) => url.startsWith(p));
 
-  // ─── Event handlers ───────────────────────────────────────────────────────
+  bool _isKnownCancelUrl(String url) =>
+      _knownCancelPatterns.any((p) => url.startsWith(p));
 
-  void _handleSuccess() {
-    if (_state is PaymentSuccess || _state is PaymentVerifying) return;
+  // ─── Central URL check ────────────────────────────────────────────────────
+
+  /// [preventable] = true when called from onNavigationRequest (can prevent).
+  /// Returns true if this was a terminal URL.
+  bool _checkUrl(String url, {required bool preventable}) {
+    if (_handled) return true;
+
+    // 1. Your app's callback URL — always means payment completed (success or
+    //    needs verification). Paystack only redirects here after a charge attempt.
+    if (_isCallbackUrl(url)) {
+      _handleSuccess(url);
+      return true;
+    }
+
+    // 2. Paystack's own close URL (inline mode / fallback)
+    if (_isKnownSuccessUrl(url)) {
+      _handleSuccess(url);
+      return true;
+    }
+
+    // 3. Explicit cancel URL
+    if (_isKnownCancelUrl(url)) {
+      _handleCancel();
+      return true;
+    }
+
+    return false;
+  }
+
+  // ─── Terminal handlers ────────────────────────────────────────────────────
+
+  void _handleSuccess(String url) {
+    if (_handled) return;
+    _handled = true;
+
+    // Extract reference from the callback URL's query params if present,
+    // otherwise fall back to the reference we already have.
+    final ref = _extractReference(url) ?? config.reference;
+    log('[Paystack] success — reference: $ref');
 
     if (onVerify != null) {
-      _runVerification();
+      _runVerification(ref);
     } else {
-      _closedByCode = true;
-      _setState(PaymentSuccess(config.reference));
-      onSuccess?.call(config.reference);
+      _setState(PaymentSuccess(ref));
     }
   }
 
-  Future<void> _runVerification() async {
+  Future<void> _runVerification(String ref) async {
     _setState(const PaymentVerifying());
     try {
-      await onVerify!(config.reference);
-      _closedByCode = true;
-      _setState(PaymentSuccess(config.reference));
-      onSuccess?.call(config.reference);
+      await onVerify!(ref);
+      _setState(PaymentSuccess(ref));
     } catch (e) {
-      log('Paystack verification failed: $e');
-      final message = 'Verification failed: $e';
-      _setState(PaymentError(message));
-      onError?.call(message);
+      _handled = false; // allow retry
+      log('[Paystack] verification failed: $e');
+      const msg = 'Payment verification failed. Please contact support.';
+      _setState(PaymentError(msg));
+      onError?.call(msg);
     }
   }
 
   void _handleCancel() {
-    if (_state is PaymentSuccess) return; // already done
-    _closedByCode = true;
+    if (_handled) return;
+    _handled = true;
+    log('[Paystack] cancelled');
     _setState(const PaymentCancelled());
-    onClosed?.call();
   }
 
-  // ─── Called by PopScope when user physically swipes down ─────────────────
-
-  /// Called by [PopScope.onPopInvokedWithResult] when the user physically
-  /// dismisses the sheet. Fires [onClosed] only when WE didn't initiate pop.
-  void handleUserDismiss() {
-    if (!_closedByCode && _state is! PaymentSuccess) {
-      onClosed?.call();
+  /// Tries to pull `reference` or `trxref` from the URL query string.
+  String? _extractReference(String url) {
+    try {
+      final uri = Uri.parse(url);
+      return uri.queryParameters['reference'] ??
+          uri.queryParameters['trxref'];
+    } catch (_) {
+      return null;
     }
   }
 
-  /// Retries loading the checkout URL — useful after a network error.
+  // ─── Called by the sheet ─────────────────────────────────────────────────
+
+  /// Sheet calls this AFTER Navigator.pop() so callbacks fire in a clean state.
+  void fireSuccessCallback() {
+    final ref = state is PaymentSuccess
+        ? (state as PaymentSuccess).reference
+        : config.reference;
+    onSuccess?.call(ref);
+  }
+
+  void fireClosedCallback() => onClosed?.call();
+
+  void handleUserDismiss() {
+    if (!_handled && _state is! PaymentSuccess) {
+      _handled = true;
+      _setState(const PaymentCancelled());
+    }
+  }
+
   void retry() {
+    _handled = false;
     _setState(const PaymentLoading());
     _webViewController?.reload();
   }
 
-  /// Clears an error state back to idle so the SnackBar isn't shown twice.
   void clearError() {
-    if (_state is PaymentError) {
-      _setState(const PaymentReady());
-    }
+    if (_state is PaymentError) _setState(const PaymentReady());
   }
-
-  // ─── Private ─────────────────────────────────────────────────────────────
 
   void _setState(PaymentState next) {
     _state = next;

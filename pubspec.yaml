@@ -1,10 +1,10 @@
-name: paystack_bottomsheet
-description: "
+name: flutter_paystack_modal
+description: >
   A Flutter package that opens Paystack's checkout inside a bottom sheet modal
   using a fully-controlled WebView — reliable onSuccess and onError callbacks,
-  no dependency on flutter_paystack_plus or paystack_payment."
+  no dependency on flutter_paystack_plus or paystack_payment.
 version: 1.0.0
-homepage: https://github.com/shegzzy/flutter_paystack_modal
+homepage: https://github.com/shegzzy/paystack_bottomsheet
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
