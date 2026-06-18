@@ -1,0 +1,103 @@
+name: Auto Tag & Version Bump
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tag:
+    # Skip commits made by this workflow to avoid infinite loops
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so we can read all tags and commits
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest semver tag
+        id: get_tag
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-version:refname | head -n1)
+          if [ -z "$LATEST" ]; then
+            LATEST="v0.0.0"
+            echo "No existing tags found — starting from $LATEST"
+          else
+            echo "Latest tag: $LATEST"
+          fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Determine bump type from conventional commits
+        id: bump
+        run: |
+          LATEST="${{ steps.get_tag.outputs.latest }}"
+
+          # Collect commit subjects + bodies since the last tag
+          if git rev-parse "$LATEST" >/dev/null 2>&1; then
+            COMMITS=$(git log "$LATEST"..HEAD --pretty=format:"%s%n%b")
+          else
+            COMMITS=$(git log --pretty=format:"%s%n%b")
+          fi
+
+          echo "=== Commits to evaluate ==="
+          echo "$COMMITS"
+          echo "==========================="
+
+          BUMP="patch"
+
+          # BREAKING CHANGE: exclamation syntax (feat!:) or footer keyword
+          if echo "$COMMITS" | grep -qE "^.+!:|BREAKING[- ]CHANGE"; then
+            BUMP="major"
+          # feat: new feature → minor bump
+          elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+            BUMP="minor"
+          fi
+          # Everything else (fix:, chore:, docs:, refactor:, etc.) → patch
+
+          echo "Bump type: $BUMP"
+          echo "bump=$BUMP" >> $GITHUB_OUTPUT
+
+      - name: Compute next version
+        id: version
+        run: |
+          LATEST="${{ steps.get_tag.outputs.latest }}"
+          BUMP="${{ steps.bump.outputs.bump }}"
+
+          VERSION="${LATEST#v}"           # strip leading 'v'
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEXT="$MAJOR.$MINOR.$PATCH"
+          echo "Next version: $NEXT"
+          echo "next=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Update pubspec.yaml
+        run: |
+          NEXT="${{ steps.version.outputs.next }}"
+          sed -i "s/^version: .*/version: $NEXT/" pubspec.yaml
+          grep "^version:" pubspec.yaml
+
+      - name: Commit updated pubspec.yaml
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pubspec.yaml
+          git commit -m "chore: bump version to ${{ steps.version.outputs.next }} [skip ci]"
+          git push
+
+      - name: Create and push tag
+        run: |
+          TAG="v${{ steps.version.outputs.next }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "::notice::Tagged release $TAG"
