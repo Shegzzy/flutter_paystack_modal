@@ -3,6 +3,7 @@ library;
 export 'src/paystack_bottom_sheet.dart';
 export 'src/models/paystack_config.dart';
 export 'src/models/payment_state.dart';
+export 'src/widgets/payment_summary_card.dart';
 
 import 'package:flutter/material.dart';
 import 'src/paystack_bottom_sheet.dart';

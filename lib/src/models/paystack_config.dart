@@ -1,5 +1,7 @@
 // lib/src/models/paystack_config.dart
 
+import '../utils/amount_formatter.dart';
+
 enum PaystackMode { authUrl, inline }
 
 class PaystackConfig {
@@ -42,25 +44,8 @@ class PaystackConfig {
     return 'https://checkout.paystack.com/$reference';
   }
 
-  String get formattedAmount {
-    final amount = amountInSubunit / 100;
-    final parts = amount.toStringAsFixed(2).split('.');
-    final intPart = parts[0].split('').reversed.toList();
-    final result = <String>[];
-    for (int i = 0; i < intPart.length; i++) {
-      if (i > 0 && i % 3 == 0) result.add(',');
-      result.add(intPart[i]);
-    }
-    final formatted = '${result.reversed.join()}.${parts[1]}';
-    return switch (currency) {
-      'NGN' => '₦$formatted',
-      'USD' => '\$$formatted',
-      'GHS' => 'GH₵$formatted',
-      'ZAR' => 'R$formatted',
-      'KES' => 'KSh$formatted',
-      _ => '$currency $formatted',
-    };
-  }
+  /// Human-readable amount string, e.g. `₦1,500.00`.
+  String get formattedAmount => AmountFormatter.format(amountInSubunit, currency);
 
   bool get isAuthUrlMode => mode == PaystackMode.authUrl;
 }

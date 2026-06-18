@@ -1,5 +1,6 @@
 // lib/src/providers/paystack_provider.dart
 
+import 'dart:async';
 import 'dart:developer';
 
 import 'package:flutter/material.dart';
@@ -7,6 +8,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/paystack_config.dart';
 import '../models/payment_state.dart';
+import '../utils/url_classifier.dart';
 
 /// ── How Paystack's redirect actually works (authUrl mode) ────────────────────
 ///
@@ -60,25 +62,23 @@ class PaystackProvider extends ChangeNotifier {
 
   bool _handled = false;
 
-  // ─── Known terminal URL patterns ─────────────────────────────────────────
-  //
-  // These cover the fallback case where no callbackUrl is configured,
-  // or for inline mode.
+  /// True once onPageFinished has fired at least once for this load.
+  /// Used by [clearError] to decide whether to reload or just dismiss the overlay.
+  bool _pageLoaded = false;
 
-  static const _knownSuccessPatterns = [
-    'https://standard.paystack.co/close',
-    'https://checkout.paystack.com/close',
-    'paystack://close',
-  ];
+  /// Guards [fireSuccessCallback] against double-invocation during the
+  /// pop-animation window.
+  bool _successCallbackFired = false;
 
-  static const _knownCancelPatterns = [
-    'https://standard.paystack.co/cancel',
-    'https://checkout.paystack.com/cancel',
-  ];
+  Timer? _loadingTimer;
+
+  /// Seconds before a stuck loading state is converted to a [PaymentError].
+  static const _loadingTimeoutSeconds = 30;
 
   // ─── WebView ──────────────────────────────────────────────────────────────
 
   void _initWebViewController() {
+    _startLoadingTimer();
     _webViewController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.transparent)
@@ -92,6 +92,8 @@ class PaystackProvider extends ChangeNotifier {
 
           onPageFinished: (url) {
             log('[Paystack] pageFinished: $url');
+            _loadingTimer?.cancel();
+            _pageLoaded = true;
             if (_state is PaymentLoading) {
               _setState(const PaymentReady());
             }
@@ -113,21 +115,24 @@ class PaystackProvider extends ChangeNotifier {
             // A 404/error on the callback URL means payment went through —
             // the app's server just isn't serving that route in the WebView.
             // Treat it as success.
-            if (_isCallbackUrl(url)) {
+            if (UrlClassifier.isCallbackUrl(url, config.callbackUrl)) {
               log('[Paystack] callback URL errored (expected) — treating as success');
+              _loadingTimer?.cancel();
               _handleSuccess(url);
               return;
             }
 
             // Ignore errors on known terminal pages (they 404 by design).
-            if (_isKnownSuccessUrl(url) || _isKnownCancelUrl(url)) return;
+            if (UrlClassifier.isKnownSuccessUrl(url) ||
+                UrlClassifier.isKnownCancelUrl(url)) return;
 
             // Ignore sub-resource errors (ads, analytics, fonts, etc.)
             if (error.isForMainFrame != null && !error.isForMainFrame!) return;
 
             // Real main-frame load failure
             if (_state is PaymentLoading || _state is PaymentReady) {
-              final msg = 'Failed to load payment page. Check your connection.';
+              _loadingTimer?.cancel();
+              const msg = 'Failed to load payment page. Check your connection.';
               _setState(PaymentError(msg));
               onError?.call(msg);
             }
@@ -137,22 +142,21 @@ class PaystackProvider extends ChangeNotifier {
       ..loadRequest(Uri.parse(config.checkoutUrl));
   }
 
-  // ─── URL classification ───────────────────────────────────────────────────
-
-  bool _isCallbackUrl(String url) {
-    final cb = config.callbackUrl;
-    if (cb == null || cb.isEmpty) return false;
-    // Strip query params from both for prefix matching
-    final cbBase = cb.split('?').first.split('#').first;
-    final urlBase = url.split('?').first.split('#').first;
-    return urlBase.startsWith(cbBase);
+  void _startLoadingTimer() {
+    _loadingTimer?.cancel();
+    _loadingTimer = Timer(
+      const Duration(seconds: _loadingTimeoutSeconds),
+      _onLoadTimeout,
+    );
   }
 
-  bool _isKnownSuccessUrl(String url) =>
-      _knownSuccessPatterns.any((p) => url.startsWith(p));
-
-  bool _isKnownCancelUrl(String url) =>
-      _knownCancelPatterns.any((p) => url.startsWith(p));
+  void _onLoadTimeout() {
+    if (_state is PaymentLoading) {
+      const msg = 'Payment page took too long to load. Check your connection.';
+      _setState(PaymentError(msg));
+      onError?.call(msg);
+    }
+  }
 
   // ─── Central URL check ────────────────────────────────────────────────────
 
@@ -163,19 +167,19 @@ class PaystackProvider extends ChangeNotifier {
 
     // 1. Your app's callback URL — always means payment completed (success or
     //    needs verification). Paystack only redirects here after a charge attempt.
-    if (_isCallbackUrl(url)) {
+    if (UrlClassifier.isCallbackUrl(url, config.callbackUrl)) {
       _handleSuccess(url);
       return true;
     }
 
     // 2. Paystack's own close URL (inline mode / fallback)
-    if (_isKnownSuccessUrl(url)) {
+    if (UrlClassifier.isKnownSuccessUrl(url)) {
       _handleSuccess(url);
       return true;
     }
 
     // 3. Explicit cancel URL
-    if (_isKnownCancelUrl(url)) {
+    if (UrlClassifier.isKnownCancelUrl(url)) {
       _handleCancel();
       return true;
     }
@@ -188,10 +192,11 @@ class PaystackProvider extends ChangeNotifier {
   void _handleSuccess(String url) {
     if (_handled) return;
     _handled = true;
+    _loadingTimer?.cancel();
 
     // Extract reference from the callback URL's query params if present,
     // otherwise fall back to the reference we already have.
-    final ref = _extractReference(url) ?? config.reference;
+    final ref = UrlClassifier.extractReference(url) ?? config.reference;
     log('[Paystack] success — reference: $ref');
 
     if (onVerify != null) {
@@ -218,25 +223,19 @@ class PaystackProvider extends ChangeNotifier {
   void _handleCancel() {
     if (_handled) return;
     _handled = true;
+    _loadingTimer?.cancel();
     log('[Paystack] cancelled');
     _setState(const PaymentCancelled());
   }
 
-  /// Tries to pull `reference` or `trxref` from the URL query string.
-  String? _extractReference(String url) {
-    try {
-      final uri = Uri.parse(url);
-      return uri.queryParameters['reference'] ??
-          uri.queryParameters['trxref'];
-    } catch (_) {
-      return null;
-    }
-  }
-
   // ─── Called by the sheet ─────────────────────────────────────────────────
 
-  /// Sheet calls this AFTER Navigator.pop() so callbacks fire in a clean state.
+  /// Fires [onSuccess] exactly once. The sheet calls this from [_onStateChange]
+  /// before popping, but the listener can fire more than once during the
+  /// pop-animation window — [_successCallbackFired] prevents double-invocation.
   void fireSuccessCallback() {
+    if (_successCallbackFired) return;
+    _successCallbackFired = true;
     final ref = state is PaymentSuccess
         ? (state as PaymentSuccess).reference
         : config.reference;
@@ -254,16 +253,35 @@ class PaystackProvider extends ChangeNotifier {
 
   void retry() {
     _handled = false;
+    _pageLoaded = false;
     _setState(const PaymentLoading());
+    _startLoadingTimer();
     _webViewController?.reload();
   }
 
+  /// Called by the sheet after showing a [PaymentError] snackbar.
+  ///
+  /// If the page loaded successfully before the error (e.g. a verification
+  /// failure), we just dismiss the error overlay — the WebView is still intact.
+  /// If the page never loaded (e.g. a network timeout), we reload so the user
+  /// isn't left with a blank WebView behind the dismissed overlay.
   void clearError() {
-    if (_state is PaymentError) _setState(const PaymentReady());
+    if (_state is! PaymentError) return;
+    if (_pageLoaded) {
+      _setState(const PaymentReady());
+    } else {
+      retry();
+    }
   }
 
   void _setState(PaymentState next) {
     _state = next;
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _loadingTimer?.cancel();
+    super.dispose();
   }
 }
