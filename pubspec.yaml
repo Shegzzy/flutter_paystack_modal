@@ -4,7 +4,7 @@ description: >
   using a fully-controlled WebView — reliable onSuccess and onError callbacks,
   no dependency on flutter_paystack_plus or paystack_payment.
 version: 1.0.2
-homepage: https://github.com/shegzzy/paystack_bottomsheet
+homepage: https://github.com/Shegzzy/flutter_paystack_modal
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
